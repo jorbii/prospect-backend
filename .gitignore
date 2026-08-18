@@ -1,1 +1,15 @@
+# Environment variables
 .env
+.env.*
+
+# Go
+*.exe
+*.out
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
