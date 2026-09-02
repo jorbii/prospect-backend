@@ -9,6 +9,7 @@ import (
 
 	"prospect/internal/auth"
 	"prospect/internal/database"
+	"prospect/internal/inventory"
 	"prospect/internal/player"
 )
 
@@ -32,6 +33,13 @@ func main() {
 	playerService := player.NewService(playerRepository)
 	playerHandler := player.NewHandler(playerService)
 
+	inventoryRepository := inventory.NewRepository(db)
+	inventoryService := inventory.NewService(inventoryRepository)
+	inventoryHandler := inventory.NewHandler(
+		inventoryService,
+		playerService,
+	)
+
 	service := auth.NewService(
 		db,
 		repository,
@@ -47,13 +55,36 @@ func main() {
 
 	http.Handle(
 		"/api/auth/test",
-		tokenService.AuthMiddleware(http.HandlerFunc(auth.TestAuthHandler)),
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(auth.TestAuthHandler),
+		),
 	)
 
 	http.Handle(
 		"/api/player/me",
 		tokenService.AuthMiddleware(
 			http.HandlerFunc(playerHandler.GetMe),
+		),
+	)
+
+	http.Handle(
+		"/api/inventory",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(inventoryHandler.GetInventory),
+		),
+	)
+
+	http.Handle(
+		"/api/inventory/items",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(inventoryHandler.AddItem),
+		),
+	)
+
+	http.Handle(
+		"/api/inventory/items/",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(inventoryHandler.DeleteItem),
 		),
 	)
 
