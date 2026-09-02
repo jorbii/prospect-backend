@@ -9,6 +9,7 @@ import (
 
 	"prospect/internal/auth"
 	"prospect/internal/database"
+	"prospect/internal/player"
 )
 
 func main() {
@@ -26,7 +27,17 @@ func main() {
 
 	repository := auth.NewRepository(db)
 	tokenService := auth.NewTokenService(os.Getenv("JWT_SECRET"))
-	service := auth.NewService(repository, tokenService)
+
+	playerRepository := player.NewRepository(db)
+	playerService := player.NewService(playerRepository)
+	playerHandler := player.NewHandler(playerService)
+
+	service := auth.NewService(
+		db,
+		repository,
+		tokenService,
+		playerService,
+	)
 
 	fmt.Println("Database connected")
 
@@ -37,6 +48,13 @@ func main() {
 	http.Handle(
 		"/api/auth/test",
 		tokenService.AuthMiddleware(http.HandlerFunc(auth.TestAuthHandler)),
+	)
+
+	http.Handle(
+		"/api/player/me",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(playerHandler.GetMe),
+		),
 	)
 
 	fmt.Println("Prospect server started on :8080")

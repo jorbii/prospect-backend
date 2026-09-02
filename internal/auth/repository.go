@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,6 +22,48 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) CreateUser(user User) error {
 	_, err := r.db.Exec(
 		context.Background(),
+		`INSERT INTO users (
+			id,
+			username,
+			email,
+			password_hash,
+			created_at
+		) VALUES ($1, $2, $3, $4, $5)`,
+		user.ID,
+		user.Username,
+		user.Email,
+		user.PasswordHash,
+		user.CreatedAt,
+	)
+
+	if err != nil {
+		var pgErr *pgconn.PgError
+
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23505" {
+				switch pgErr.ConstraintName {
+				case "users_username_key":
+					return ErrUsernameExists
+
+				case "users_email_key":
+					return ErrEmailExists
+				}
+			}
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (r *Repository) CreateUserTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	user User,
+) error {
+	_, err := tx.Exec(
+		ctx,
 		`INSERT INTO users (
 			id,
 			username,

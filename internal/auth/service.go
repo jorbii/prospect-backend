@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -13,15 +15,32 @@ var ErrUsernameExists = errors.New("username already exists")
 var ErrEmailExists = errors.New("email already exists")
 var ErrInvalidCredentials = errors.New("invalid email or password")
 
-type Service struct {
-	repository   *Repository
-	tokenService *TokenService
+type PlayerCreator interface {
+	CreatePlayerTx(
+		ctx context.Context,
+		tx pgx.Tx,
+		userID uuid.UUID,
+	) error
 }
 
-func NewService(repository *Repository, tokenService *TokenService) *Service {
+type Service struct {
+	repository    *Repository
+	tokenService  *TokenService
+	playerService PlayerCreator
+	db            *pgxpool.Pool
+}
+
+func NewService(
+	db *pgxpool.Pool,
+	repository *Repository,
+	tokenService *TokenService,
+	playerService PlayerCreator,
+) *Service {
 	return &Service{
-		repository:   repository,
-		tokenService: tokenService,
+		db:            db,
+		repository:    repository,
+		tokenService:  tokenService,
+		playerService: playerService,
 	}
 }
 
@@ -47,7 +66,34 @@ func (s *Service) RegisterUser(req RegisterRequest) error {
 		CreatedAt:    time.Now(),
 	}
 
-	err = s.repository.CreateUser(user)
+	ctx := context.Background()
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+
+	err = s.repository.CreateUserTx(
+		ctx,
+		tx,
+		user,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = s.playerService.CreatePlayerTx(
+		ctx,
+		tx,
+		user.ID,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = tx.Commit(ctx)
 	if err != nil {
 		return err
 	}

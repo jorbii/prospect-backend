@@ -15,6 +15,17 @@ type User struct {
 	LastLoginAt  *time.Time
 }
 
+type Player struct {
+	ID              uuid.UUID `json:"id"`
+	UserID          uuid.UUID `json:"user_id"`
+	XP              int64     `json:"xp"`
+	Level           int       `json:"level"`
+	Cash            int64     `json:"cash"`
+	PremiumCurrency int64     `json:"premium_currency"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
