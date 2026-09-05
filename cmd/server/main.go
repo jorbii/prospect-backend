@@ -11,6 +11,7 @@ import (
 	"prospect/internal/database"
 	"prospect/internal/inventory"
 	"prospect/internal/item"
+	"prospect/internal/loot"
 	"prospect/internal/player"
 	"prospect/internal/weapon"
 )
@@ -106,6 +107,14 @@ func main() {
 	http.HandleFunc("/health", healthHandler)
 
 	// ========================================
+	// loot Module
+	// ========================================
+
+	lootRepository := loot.NewRepository(db)
+	lootService := loot.NewService(lootRepository)
+	lootHandler := loot.NewHandler(lootService)
+
+	// ========================================
 	// Auth Routes
 	// ========================================
 
@@ -188,6 +197,24 @@ func main() {
 	http.HandleFunc(
 		"/api/weapons/",
 		weaponHandler.GetByID,
+	)
+
+	// ========================================
+	// loot Route
+	// ========================================
+
+	http.Handle(
+		"/api/loot",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(lootHandler.GetAll),
+		),
+	)
+
+	http.Handle(
+		"/api/loot/",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(lootHandler.GetByID),
+		),
 	)
 
 	// ========================================
