@@ -10,14 +10,24 @@ import (
 	"prospect/internal/auth"
 	"prospect/internal/database"
 	"prospect/internal/inventory"
+	"prospect/internal/item"
 	"prospect/internal/player"
 )
 
 func main() {
+
+	// ========================================
+	// Environment
+	// ========================================
+
 	err := godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: .env file not found")
 	}
+
+	// ========================================
+	// Database
+	// ========================================
 
 	db, err := database.NewPostgresPool()
 	if err != nil {
@@ -26,12 +36,42 @@ func main() {
 	}
 	defer db.Close()
 
+	// ========================================
+	// Auth Module
+	// ========================================
+
 	repository := auth.NewRepository(db)
 	tokenService := auth.NewTokenService(os.Getenv("JWT_SECRET"))
+
+	service := auth.NewService(
+		db,
+		repository,
+		tokenService,
+		nil,
+	)
+
+	// ========================================
+	// Player Module
+	// ========================================
 
 	playerRepository := player.NewRepository(db)
 	playerService := player.NewService(playerRepository)
 	playerHandler := player.NewHandler(playerService)
+
+	// ========================================
+	// Auth Service
+	// ========================================
+
+	service = auth.NewService(
+		db,
+		repository,
+		tokenService,
+		playerService,
+	)
+
+	// ========================================
+	// Inventory Module
+	// ========================================
 
 	inventoryRepository := inventory.NewRepository(db)
 	inventoryService := inventory.NewService(inventoryRepository)
@@ -40,18 +80,35 @@ func main() {
 		playerService,
 	)
 
-	service := auth.NewService(
-		db,
-		repository,
-		tokenService,
-		playerService,
-	)
+	// ========================================
+	// Item Module
+	// ========================================
+
+	itemRepository := item.NewRepository(db)
+	itemService := item.NewService(itemRepository)
+	itemHandler := item.NewHandler(itemService)
 
 	fmt.Println("Database connected")
 
+	// ========================================
+	// Health
+	// ========================================
+
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/api/auth/register", service.RegisterHandler)
-	http.HandleFunc("/api/auth/login", service.LoginHandler)
+
+	// ========================================
+	// Auth Routes
+	// ========================================
+
+	http.HandleFunc(
+		"/api/auth/register",
+		service.RegisterHandler,
+	)
+
+	http.HandleFunc(
+		"/api/auth/login",
+		service.LoginHandler,
+	)
 
 	http.Handle(
 		"/api/auth/test",
@@ -60,12 +117,20 @@ func main() {
 		),
 	)
 
+	// ========================================
+	// Player Routes
+	// ========================================
+
 	http.Handle(
 		"/api/player/me",
 		tokenService.AuthMiddleware(
 			http.HandlerFunc(playerHandler.GetMe),
 		),
 	)
+
+	// ========================================
+	// Inventory Routes
+	// ========================================
 
 	http.Handle(
 		"/api/inventory",
@@ -87,6 +152,24 @@ func main() {
 			http.HandlerFunc(inventoryHandler.DeleteItem),
 		),
 	)
+
+	// ========================================
+	// Item Routes
+	// ========================================
+
+	http.HandleFunc(
+		"/api/items",
+		itemHandler.GetAll,
+	)
+
+	http.HandleFunc(
+		"/api/items/",
+		itemHandler.GetByID,
+	)
+
+	// ========================================
+	// Start Server
+	// ========================================
 
 	fmt.Println("Prospect server started on :8080")
 
