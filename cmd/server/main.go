@@ -12,6 +12,7 @@ import (
 	"prospect/internal/inventory"
 	"prospect/internal/item"
 	"prospect/internal/player"
+	"prospect/internal/weapon"
 )
 
 func main() {
@@ -91,6 +92,14 @@ func main() {
 	fmt.Println("Database connected")
 
 	// ========================================
+	// weapon Module
+	// ========================================
+
+	weaponRepository := weapon.NewRepository(db)
+	weaponService := weapon.NewService(weaponRepository)
+	weaponHandler := weapon.NewHandler(weaponService)
+
+	// ========================================
 	// Health
 	// ========================================
 
@@ -165,6 +174,20 @@ func main() {
 	http.HandleFunc(
 		"/api/items/",
 		itemHandler.GetByID,
+	)
+
+	// ========================================
+	// weapon Routes
+	// ========================================
+
+	http.HandleFunc(
+		"/api/weapons",
+		weaponHandler.GetAll,
+	)
+
+	http.HandleFunc(
+		"/api/weapons/",
+		weaponHandler.GetByID,
 	)
 
 	// ========================================
