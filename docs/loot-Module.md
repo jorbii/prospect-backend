@@ -1,37 +1,45 @@
-````markdown
 # Loot Module
 
 ## Зміст
 
 1. [Що таке Loot Module](#s1)
 2. [Архітектура Loot Module](#s2)
-   - 2.1 [Model](#s2-1)
-   - 2.2 [Service](#s2-2)
-   - 2.3 [Repository](#s2-3)
-   - 2.4 [Handler](#s2-4)
+
+   * 2.1 [Model](#s2-1)
+   * 2.2 [Service](#s2-2)
+   * 2.3 [Repository](#s2-3)
+   * 2.4 [Handler](#s2-4)
 3. [Loot Model](#s3)
 4. [Створення Loot](#s4)
 5. [Отримання Loot](#s5)
-   - 5.1 [Отримати весь Loot](#s5-1)
-   - 5.2 [Отримати Loot за ID](#s5-2)
-   - 5.3 [Невалідний ID](#s5-3)
-   - 5.4 [Loot не знайдений](#s5-4)
+
+   * 5.1 [Отримати весь Loot](#s5-1)
+   * 5.2 [Отримати Loot за ID](#s5-2)
+   * 5.3 [Невалідний ID](#s5-3)
+   * 5.4 [Loot не знайдений](#s5-4)
 6. [Видалення Loot](#s6)
-7. [Database](#s7)
-   - 7.1 [Таблиця loot](#s7-1)
-   - 7.2 [Foreign Key](#s7-2)
-   - 7.3 [Constraints](#s7-3)
-8. [Error Handling](#s8)
-9. [API Endpoints](#s9)
-10. [Структура файлів](#s10)
-11. [Повний Flow](#s11)
-12. [Майбутній Pickup Flow](#s12)
+7. [Pickup Loot](#s7)
+
+   * 7.1 [Pickup Flow](#s7-1)
+   * 7.2 [Player Resolution](#s7-2)
+   * 7.3 [Transaction](#s7-3)
+   * 7.4 [Concurrency Protection](#s7-4)
+8. [Database](#s8)
+
+   * 8.1 [Таблиця loot](#s8-1)
+   * 8.2 [Foreign Key](#s8-2)
+   * 8.3 [Constraints](#s8-3)
+9. [Error Handling](#s9)
+10. [API Endpoints](#s10)
+11. [Структура файлів](#s11)
+12. [Повний Flow](#s12)
 13. [Current Status](#s13)
 14. [Next Module](#s14)
 
 ---
 
 <a name="s1"></a>
+
 # 1. Що таке Loot Module
 
 Loot Module відповідає за предмети, які знаходяться безпосередньо на карті гри.
@@ -48,7 +56,7 @@ Player
         ├── AK-47
         ├── Ammo
         └── Medkit
-````
+```
 
 Loot:
 
@@ -83,15 +91,16 @@ Loot має:
 }
 ```
 
-Loot Module поки що відповідає тільки за:
+Loot Module відповідає за:
 
 ```text
 CREATE
 GET
 DELETE
+PICKUP
 ```
 
-Pickup механіка буде реалізована пізніше.
+Pickup переміщує Loot у Inventory Player.
 
 ---
 
@@ -129,20 +138,49 @@ HTTP Request
 
 ```text
 Handler
+
 ↓
+
 HTTP
 
 Service
+
 ↓
+
 Business Logic
 
 Repository
+
 ↓
+
 Database
 
 Model
+
 ↓
+
 Data Structure
+```
+
+Pickup має додаткову взаємодію з Player:
+
+```text
+JWT
+ │
+ ▼
+user_id
+ │
+ ▼
+Player Repository
+ │
+ ▼
+player_id
+ │
+ ▼
+Loot Repository
+ │
+ ▼
+Inventory
 ```
 
 ---
@@ -210,9 +248,10 @@ Create
 GetByID
 GetAll
 Delete
+Pickup
 ```
 
-Також Service перевіряє вхідні дані.
+Service перевіряє вхідні дані.
 
 Наприклад:
 
@@ -230,7 +269,42 @@ if loot.Quantity <= 0 {
 }
 ```
 
-Тобто Handler не повинен самостійно вирішувати business rules.
+Для Pickup Service:
+
+1. перевіряє `userID`
+2. перевіряє `lootID`
+3. знаходить Player через `userID`
+4. отримує `player.ID`
+5. передає `player.ID` та `lootID` у Repository
+
+```go
+func (s *Service) Pickup(
+    ctx context.Context,
+    userID uuid.UUID,
+    lootID uuid.UUID,
+) error {
+    if userID == uuid.Nil {
+        return ErrInvalidPlayerID
+    }
+
+    if lootID == uuid.Nil {
+        return ErrInvalidLootID
+    }
+
+    player, err := s.playerRepository.GetByUserID(ctx, userID)
+    if err != nil {
+        return err
+    }
+
+    return s.repository.PickupTx(
+        ctx,
+        player.ID,
+        lootID,
+    )
+}
+```
+
+Таким чином Handler не працює безпосередньо з Player ID.
 
 Правильний flow:
 
@@ -241,6 +315,8 @@ Handler
 Service
    │
    ├── Validate
+   │
+   ├── Resolve Player
    │
    ▼
 Repository
@@ -258,7 +334,7 @@ Repository
 internal/loot/repository.go
 ```
 
-Repository відповідає тільки за роботу з PostgreSQL.
+Repository відповідає за роботу з PostgreSQL.
 
 Методи:
 
@@ -267,6 +343,7 @@ Create()
 GetByID()
 GetAll()
 Delete()
+PickupTx()
 ```
 
 Repository не повинен містити game logic.
@@ -294,6 +371,41 @@ FROM loot
 WHERE id = $1;
 ```
 
+### PickupTx
+
+Pickup виконується через database transaction:
+
+```go
+func (r *Repository) PickupTx(
+    ctx context.Context,
+    playerID uuid.UUID,
+    lootID uuid.UUID,
+) error
+```
+
+Операція виконує:
+
+```text
+BEGIN
+   │
+   ├── Find Loot
+   │
+   ├── Lock Loot
+   │
+   ├── Add Item to Inventory
+   │
+   ├── Delete Loot
+   │
+   ▼
+ COMMIT
+```
+
+Якщо будь-яка операція завершується помилкою:
+
+```text
+ROLLBACK
+```
+
 ---
 
 <a name="s2-4"></a>
@@ -313,26 +425,39 @@ Handler відповідає за HTTP.
 ```text
 HTTP Request
      ↓
-Parse URL
+Parse URL / Body
+     ↓
+Validate HTTP input
      ↓
 Call Service
      ↓
 HTTP Response
 ```
 
-Наприклад:
+Для Create Handler отримує JSON:
 
-```text
-GET /api/loot/UUID
+```json
+{
+    "item_id": "2f4d8c91-7e13-4f3d-a812-5e4d7b9c3210",
+    "quantity": 60,
+    "position_x": 210.2,
+    "position_y": 94.7
+}
 ```
 
-Handler:
+Для Pickup Handler отримує `lootID` з URL:
 
-1. отримує ID з URL
-2. перевіряє UUID
-3. викликає Service
-4. повертає JSON
-5. повертає відповідний HTTP status
+```text
+POST /api/loot/pickup/{lootID}
+```
+
+та `userID` з JWT context:
+
+```go
+userIDString, ok := auth.UserIDFromContext(r)
+```
+
+Після цього Handler передає дані Service.
 
 ---
 
@@ -346,6 +471,7 @@ Loot пов'язаний з Item через `item_id`.
 
 ```text
 items
+
 ┌──────────────────────────────────┐
 │ id = abc                         │
 │ name = 5.56 Ammo                 │
@@ -357,10 +483,10 @@ items
 loot            │
 ┌──────────────────────────────────┐
 │ id = xyz                         │
-│ item_id = abc                   │
-│ quantity = 60                   │
-│ position_x = 210.2              │
-│ position_y = 94.7               │
+│ item_id = abc                    │
+│ quantity = 60                    │
+│ position_x = 210.2               │
+│ position_y = 94.7                │
 └──────────────────────────────────┘
 ```
 
@@ -382,11 +508,15 @@ items
 
 ```text
 Item
+
 ↓
+
 Що це за предмет?
 
 Loot
+
 ↓
+
 Де він знаходиться і скільки його?
 ```
 
@@ -396,51 +526,52 @@ Loot
 
 # 4. Створення Loot
 
-Створення Loot виконується через Service.
+Створення Loot виконується через:
 
-Метод:
-
-```go
-func (s *Service) Create(
-    ctx context.Context,
-    loot Loot,
-) (Loot, error)
+```http
+POST /api/loot
 ```
 
-Перед створенням перевіряється `ItemID`.
+Request body:
 
-```go
-if loot.ItemID == uuid.Nil {
-    return Loot{}, ErrInvalidItemID
+```json
+{
+    "item_id": "2f4d8c91-7e13-4f3d-a812-5e4d7b9c3210",
+    "quantity": 60,
+    "position_x": 210.2,
+    "position_y": 94.7
 }
 ```
 
-Також перевіряється Quantity:
-
-```go
-if loot.Quantity <= 0 {
-    return Loot{}, ErrInvalidQuantity
-}
-```
-
-Після validation Service передає дані Repository:
+Service перевіряє:
 
 ```text
-Create Loot
-     │
-     ▼
-Validate ItemID
-     │
-     ▼
-Validate Quantity
-     │
-     ▼
+ItemID != uuid.Nil
+Quantity > 0
+```
+
+Flow:
+
+```text
+POST /api/loot
+       │
+       ▼
+Parse JSON
+       │
+       ▼
+Service.Create()
+       │
+       ├── Validate ItemID
+       │
+       ├── Validate Quantity
+       │
+       ▼
 Repository.Create()
-     │
-     ▼
+       │
+       ▼
 INSERT INTO loot
-     │
-     ▼
+       │
+       ▼
 PostgreSQL
 ```
 
@@ -462,6 +593,14 @@ RETURNING
     position_y,
     created_at;
 ```
+
+Успішне створення повертає:
+
+```http
+201 Created
+```
+
+та створений Loot у JSON.
 
 ---
 
@@ -491,6 +630,8 @@ Endpoint:
 
 ```http
 GET /api/loot
+
+Authorization: Bearer <token>
 ```
 
 Handler викликає:
@@ -554,6 +695,8 @@ Endpoint:
 
 ```http
 GET /api/loot/{lootID}
+
+Authorization: Bearer <token>
 ```
 
 Handler отримує ID:
@@ -652,7 +795,7 @@ invalid loot id
 GET /api/loot/7c1c7b4f-6d7f-4c3d-9d7e-1a8e5b6c1234
 ```
 
-Repository поверне помилку PostgreSQL.
+Repository поверне помилку `pgx.ErrNoRows`.
 
 Handler повертає:
 
@@ -719,39 +862,290 @@ func (s *Service) Delete(
 }
 ```
 
-На поточному етапі Delete існує на рівні Repository і Service.
+На поточному етапі окремий HTTP endpoint для Delete не реалізований.
 
-Окремий HTTP endpoint для клієнта поки не реалізований.
-
-Причина:
-
-Loot повинен видалятися не просто через звичайний DELETE, а в контексті game logic.
-
-Наприклад, майбутній Pickup:
-
-```text
-Player
-   │
-   ▼
-Pickup Loot
-   │
-   ▼
-Check Loot
-   │
-   ▼
-Add Item to Inventory
-   │
-   ▼
-Delete Loot
-```
-
-Ця операція повинна бути transaction-safe.
+Loot видаляється через game logic, зокрема під час Pickup.
 
 ---
 
 <a name="s7"></a>
 
-# 7. Database
+# 7. Pickup Loot
+
+Pickup дозволяє Player забрати Loot з карти та додати його до Inventory.
+
+Endpoint:
+
+```http
+POST /api/loot/pickup/{lootID}
+
+Authorization: Bearer <token>
+```
+
+У Pickup використовуються два різних ID:
+
+```text
+user_id
+loot_id
+```
+
+`user_id` береться з JWT.
+
+`loot_id` береться з URL.
+
+Player ID безпосередньо з JWT не передається.
+
+---
+
+<a name="s7-1"></a>
+
+## 7.1 Pickup Flow
+
+Повний flow:
+
+```text
+Client
+  │
+  │ POST /api/loot/pickup/{lootID}
+  │ Authorization: Bearer JWT
+  ▼
+Auth Middleware
+  │
+  │ user_id
+  ▼
+Loot Handler
+  │
+  ├── Parse loot_id
+  │
+  ├── Get user_id from context
+  │
+  ▼
+Loot Service
+  │
+  ├── Validate user_id
+  │
+  ├── Validate loot_id
+  │
+  ├── Find Player
+  │
+  ▼
+Player Repository
+  │
+  │ GetByUserID()
+  ▼
+player_id
+  │
+  ▼
+Loot Repository
+  │
+  ▼
+PickupTx()
+  │
+  ├── Get Loot
+  ├── Add Item to Inventory
+  └── Delete Loot
+  │
+  ▼
+COMMIT
+  │
+  ▼
+Handler
+  │
+  ▼
+200 OK
+```
+
+Успішна відповідь:
+
+```http
+200 OK
+```
+
+```json
+{
+    "message": "loot picked up successfully"
+}
+```
+
+---
+
+<a name="s7-2"></a>
+
+## 7.2 Player Resolution
+
+JWT містить:
+
+```text
+user_id
+```
+
+А Inventory використовує:
+
+```text
+player_id
+```
+
+Тому Pickup використовує наступний flow:
+
+```text
+JWT
+ │
+ ▼
+user_id
+ │
+ ▼
+Player.GetByUserID()
+ │
+ ▼
+player.id
+ │
+ ▼
+Inventory
+```
+
+Це важливо, оскільки `user_id` та `player_id` є різними сутностями.
+
+Структура:
+
+```text
+User
+ │
+ └── Player
+       │
+       └── Inventory
+```
+
+---
+
+<a name="s7-3"></a>
+
+## 7.3 Transaction
+
+Pickup виконується в одній database transaction.
+
+```text
+BEGIN
+   │
+   ├── SELECT Loot
+   │
+   ├── Add Item to Inventory
+   │
+   ├── DELETE Loot
+   │
+   ▼
+ COMMIT
+```
+
+Якщо додавання Item до Inventory не вдалося:
+
+```text
+ROLLBACK
+```
+
+Якщо видалення Loot не вдалося:
+
+```text
+ROLLBACK
+```
+
+Це запобігає ситуації:
+
+```text
+Item added to Inventory
+        ↓
+Delete Loot failed
+        ↓
+Loot still exists
+```
+
+Такий сценарій міг би створити duplication exploit.
+
+Правильна поведінка:
+
+```text
+BEGIN
+
+Add Item
+   ↓
+Success
+
+Delete Loot
+   ↓
+Success
+
+COMMIT
+```
+
+або:
+
+```text
+BEGIN
+
+Operation failed
+
+ROLLBACK
+```
+
+---
+
+<a name="s7-4"></a>
+
+## 7.4 Concurrency Protection
+
+Перед отриманням Loot використовується:
+
+```sql
+SELECT item_id, quantity
+FROM loot
+WHERE id = $1
+FOR UPDATE;
+```
+
+`FOR UPDATE` блокує конкретний Loot row до завершення transaction.
+
+Це захищає від одночасного Pickup одного Loot двома запитами.
+
+Без блокування потенційно можливий сценарій:
+
+```text
+Request A → Find Loot
+Request B → Find Loot
+
+Request A → Add Item
+Request B → Add Item
+
+Request A → Delete Loot
+Request B → Delete Loot
+```
+
+З `FOR UPDATE`:
+
+```text
+Request A
+   │
+   ▼
+LOCK Loot
+   │
+   ├── Add Item
+   ├── Delete Loot
+   └── COMMIT
+          │
+          ▼
+       Unlock
+
+Request B
+   │
+   ▼
+Cannot use already processed Loot
+```
+
+Таким чином Pickup захищений від race condition на рівні database transaction.
+
+---
+
+<a name="s8"></a>
+
+# 8. Database
 
 Файл migration:
 
@@ -761,9 +1155,9 @@ internal/database/migrations/007_create_loot.sql
 
 ---
 
-<a name="s7-1"></a>
+<a name="s8-1"></a>
 
-## 7.1 Таблиця loot
+## 8.1 Таблиця loot
 
 ```sql
 CREATE TABLE loot (
@@ -798,9 +1192,9 @@ CREATE TABLE loot (
 
 ---
 
-<a name="s7-2"></a>
+<a name="s8-2"></a>
 
-## 7.2 Foreign Key
+## 8.2 Foreign Key
 
 `item_id` посилається на:
 
@@ -824,36 +1218,13 @@ Item
 
 Не можна видалити Item, якщо він використовується Loot.
 
-Наприклад:
-
-```text
-items
-   │
-   └── AK-47
-          │
-          └── loot
-```
-
-Якщо Loot існує:
-
-```sql
-DELETE FROM items
-WHERE name = 'AK-47';
-```
-
-PostgreSQL не дозволить це зробити через:
-
-```text
-ON DELETE RESTRICT
-```
-
 Це захищає database integrity.
 
 ---
 
-<a name="s7-3"></a>
+<a name="s8-3"></a>
 
-## 7.3 Constraints
+## 8.3 Constraints
 
 ### Quantity
 
@@ -892,18 +1263,20 @@ Loot завжди має позицію на карті.
 
 ---
 
-<a name="s8"></a>
+<a name="s9"></a>
 
-# 8. Error Handling
+# 9. Error Handling
 
 Loot Module використовує validation на Service рівні.
 
-Errors:
+Основні errors:
 
 ```go
 var (
     ErrInvalidItemID   = errors.New("item id is required")
     ErrInvalidQuantity = errors.New("quantity must be greater than zero")
+    ErrInvalidLootID   = errors.New("loot id is required")
+    ErrInvalidPlayerID = errors.New("player id is required")
 )
 ```
 
@@ -919,6 +1292,12 @@ ItemID == uuid.Nil
 ErrInvalidItemID
 ```
 
+HTTP:
+
+```text
+400 Bad Request
+```
+
 ### Invalid Quantity
 
 ```text
@@ -931,20 +1310,69 @@ Quantity <= 0
 ErrInvalidQuantity
 ```
 
-### HTTP errors
+HTTP:
 
-| Situation      | Status |
-| -------------- | -----: |
-| Invalid UUID   |    400 |
-| Loot not found |    404 |
-| Database error |    500 |
-| Successful GET |    200 |
+```text
+400 Bad Request
+```
+
+### Invalid Loot ID
+
+Невалідний UUID у URL:
+
+```text
+ErrInvalidLootID
+```
+
+HTTP:
+
+```text
+400 Bad Request
+```
+
+### Unauthorized
+
+Якщо JWT context не містить `user_id`:
+
+```text
+401 Unauthorized
+```
+
+### Loot Not Found
+
+Якщо Loot не існує:
+
+```text
+404 Not Found
+```
+
+### Database Error
+
+Непередбачена помилка database:
+
+```text
+500 Internal Server Error
+```
+
+### HTTP Statuses
+
+| Situation         | Status |
+| ----------------- | -----: |
+| Invalid UUID      |    400 |
+| Invalid Item ID   |    400 |
+| Invalid Quantity  |    400 |
+| Unauthorized      |    401 |
+| Loot not found    |    404 |
+| Database error    |    500 |
+| Successful GET    |    200 |
+| Successful Pickup |    200 |
+| Successful Create |    201 |
 
 ---
 
-<a name="s9"></a>
+<a name="s10"></a>
 
-# 9. API Endpoints
+# 10. API Endpoints
 
 Loot endpoints захищені JWT middleware.
 
@@ -952,6 +1380,7 @@ Loot endpoints захищені JWT middleware.
 
 ```http
 GET /api/loot
+
 Authorization: Bearer <token>
 ```
 
@@ -963,10 +1392,39 @@ Response:
 
 ---
 
+### Create Loot
+
+```http
+POST /api/loot
+
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+    "item_id": "2f4d8c91-7e13-4f3d-a812-5e4d7b9c3210",
+    "quantity": 60,
+    "position_x": 210.2,
+    "position_y": 94.7
+}
+```
+
+Response:
+
+```http
+201 Created
+```
+
+---
+
 ### Get Loot by ID
 
 ```http
 GET /api/loot/{lootID}
+
 Authorization: Bearer <token>
 ```
 
@@ -982,6 +1440,7 @@ Response:
 
 ```http
 GET /api/loot/hello
+
 Authorization: Bearer <token>
 ```
 
@@ -997,6 +1456,7 @@ Response:
 
 ```http
 GET /api/loot/{nonexistentUUID}
+
 Authorization: Bearer <token>
 ```
 
@@ -1008,35 +1468,73 @@ Response:
 
 ---
 
-### Поточні client-facing endpoints
+### Pickup Loot
 
-```text
-GET     /api/loot
-GET     /api/loot/{id}
+```http
+POST /api/loot/pickup/{lootID}
+
+Authorization: Bearer <token>
 ```
 
-Поки що немає:
+Response:
 
-```text
-POST    /api/loot
-DELETE  /api/loot/{id}
-POST    /api/loot/{id}/pickup
+```http
+200 OK
 ```
 
-Це зроблено навмисно.
+```json
+{
+    "message": "loot picked up successfully"
+}
+```
 
-Loot generation та pickup будуть частиною подальшої game logic.
+Pickup:
+
+```text
+Loot
+  │
+  ├── item_id
+  └── quantity
+        │
+        ▼
+    Inventory
+        │
+        ▼
+    Loot DELETE
+```
 
 ---
 
-<a name="s10"></a>
+### Поточні endpoints
 
-# 10. Структура файлів
+```text
+GET  /api/loot
+POST /api/loot
+GET  /api/loot/{id}
+POST /api/loot/pickup/{id}
+```
+
+Окремого client-facing endpoint:
+
+```text
+DELETE /api/loot/{id}
+```
+
+поки немає.
+
+Видалення Loot використовується внутрішньо під час Pickup.
+
+---
+
+<a name="s11"></a>
+
+# 11. Структура файлів
 
 Поточна структура:
 
 ```text
 internal/
+
 ├── auth/
 │   ├── handler.go
 │   ├── middleware.go
@@ -1089,9 +1587,9 @@ internal/
 
 ---
 
-<a name="s11"></a>
+<a name="s12"></a>
 
-# 11. Повний Flow
+# 12. Повний Flow
 
 ## GET /api/loot
 
@@ -1128,6 +1626,44 @@ Service
 Handler
   │
   │ JSON
+  ▼
+Client
+```
+
+---
+
+## POST /api/loot
+
+```text
+Client
+  │
+  │ POST /api/loot
+  │ JSON
+  ▼
+Auth Middleware
+  │
+  ▼
+Loot Handler
+  │
+  │ Parse JSON
+  ▼
+Loot Service
+  │
+  ├── Validate ItemID
+  ├── Validate Quantity
+  │
+  ▼
+Loot Repository
+  │
+  │ INSERT
+  ▼
+PostgreSQL
+  │
+  │ Created Loot
+  ▼
+Handler
+  │
+  │ 201 Created
   ▼
 Client
 ```
@@ -1174,81 +1710,65 @@ Handler
 
 ---
 
-<a name="s12"></a>
-
-# 12. Майбутній Pickup Flow
-
-Pickup ще не реалізований.
-
-Але архітектура Loot вже підготовлена під нього.
-
-Коли Player підбирає Loot:
+## POST /api/loot/pickup/{id}
 
 ```text
-Player
+Client
   │
-  │ Pickup Loot
+  │ POST /api/loot/pickup/{lootID}
+  │ Authorization: Bearer JWT
+  ▼
+Auth Middleware
+  │
+  │ user_id
+  ▼
+Loot Handler
+  │
+  ├── Parse lootID
+  │
+  └── Get userID
+  │
   ▼
 Loot Service
   │
-  ├── Find Loot
+  ├── Validate IDs
   │
-  ├── Validate Loot
+  └── Get Player by userID
   │
-  ├── Add Item to Inventory
+  ▼
+Player Repository
   │
-  └── Delete Loot
+  │ GetByUserID()
+  ▼
+player_id
+  │
+  ▼
+Loot Repository
+  │
+  │ BEGIN
+  ▼
+SELECT Loot
+FOR UPDATE
+  │
+  ▼
+Get item_id + quantity
+  │
+  ▼
+INSERT / UPDATE Inventory
+  │
+  ▼
+DELETE Loot
   │
   ▼
 COMMIT
+  │
+  ▼
+Handler
+  │
+  │ 200 OK
+  ▼
+Client
 ```
-
-Ключовий момент:
-
-```text
-Add Item
-    +
-Delete Loot
-```
-
-повинні бути однією database transaction.
-
-Неправильний варіант:
-
-```text
-Add Item
-   ↓
-Success
-
-Delete Loot
-   ↓
-Failed
-```
-
-У такому випадку Player отримав Item, але Loot залишився на карті.
-
-Це може створити duplication exploit.
-
-Правильний варіант:
-
-```text
-BEGIN
-   │
-   ├── Add Item to Inventory
-   │
-   ├── Delete Loot
-   │
-   ▼
-COMMIT
-```
-
-Якщо будь-яка операція не вдалася:
-
-```text
-ROLLBACK
-```
-
-Тоді стан повертається назад.
 
 ---
 
@@ -1256,7 +1776,7 @@ ROLLBACK
 
 # 13. Current Status
 
-Loot Module реалізований на базовому рівні.
+Loot Module реалізований.
 
 ### Database
 
@@ -1282,6 +1802,9 @@ Loot Module реалізований на базовому рівні.
 ✓ GetByID
 ✓ GetAll
 ✓ Delete
+✓ PickupTx
+✓ Database transaction
+✓ FOR UPDATE locking
 ```
 
 ### Service
@@ -1291,8 +1814,12 @@ Loot Module реалізований на базовому рівні.
 ✓ GetByID
 ✓ GetAll
 ✓ Delete
+✓ Pickup
 ✓ ItemID validation
 ✓ Quantity validation
+✓ Loot ID validation
+✓ Player ID validation
+✓ Player resolution через user_id
 ```
 
 ### Handler
@@ -1300,20 +1827,32 @@ Loot Module реалізований на базовому рівні.
 ```text
 ✓ GetAll
 ✓ GetByID
+✓ Create
+✓ Pickup
 ✓ UUID validation
+✓ Request body parsing
 ✓ 404 handling
+✓ JWT context integration
 ```
 
 ### Authentication
 
 ```text
 ✓ JWT protected routes
+✓ user_id extracted from JWT
 ```
 
 ### Pickup
 
 ```text
-⏳ Not implemented yet
+✓ Loot → Inventory
+✓ Player resolution
+✓ Inventory stacking
+✓ Loot deletion
+✓ Transaction
+✓ Rollback
+✓ FOR UPDATE protection
+✓ End-to-end tested
 ```
 
 Поточний flow:
@@ -1326,16 +1865,31 @@ Loot
   │
   ▼
 Map
-```
-
-Майбутній flow:
-
-```text
-Loot
   │
   │ Pickup
   ▼
+Player
+  │
+  ▼
 Inventory
+```
+
+Pickup вже протестований end-to-end:
+
+```text
+POST /api/loot
+        ↓
+Loot created
+        ↓
+POST /api/loot/pickup/{loot_id}
+        ↓
+Loot moved to Inventory
+        ↓
+Loot deleted
+        ↓
+GET /api/inventory
+        ↓
+Item quantity updated
 ```
 
 ---
@@ -1344,47 +1898,43 @@ Inventory
 
 # 14. Next Module
 
-Після Loot Module наступним логічним етапом є реалізація механіки взаємодії Loot з Player та Inventory.
+Loot Module завершений на поточному етапі.
 
-Основний майбутній flow:
+Наступний логічний модуль:
+
+```text
+Loadout
+```
+
+Loadout буде відповідати за спорядження Player перед грою.
+
+Очікуваний flow:
 
 ```text
 Player
-   │
-   ▼
-Loot
-   │
-   ▼
-Pickup
-   │
-   ▼
-Transaction
-   │
-   ├── Inventory + Item
-   │
-   └── Loot DELETE
-   │
-   ▼
-COMMIT
+  │
+  ▼
+Loadout
+  │
+  ├── Weapon
+  ├── Armor
+  ├── Equipment
+  └── Items
 ```
 
-Після цього backend матиме вже основний цикл:
+У подальшому Loadout буде пов'язаний з Match:
 
 ```text
 Player
-   │
-   ├── Inventory
-   │
-   └── Loot
-          │
-          ▼
-       Pickup
-          │
-          ▼
-       Inventory
+  │
+  ▼
+Loadout
+  │
+  ▼
+Match
+  │
+  ▼
+Spawn
 ```
 
-Це є основою для подальшої ігрової логіки Prospect.
-
-```
-```
+Після реалізації Loadout backend поступово переходить від CRUD-модулів до основної gameplay logic Prospect.

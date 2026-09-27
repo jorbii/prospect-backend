@@ -3,6 +3,7 @@ package loot
 import (
 	"context"
 	"errors"
+	"prospect/internal/player"
 
 	"github.com/google/uuid"
 )
@@ -10,15 +11,22 @@ import (
 var (
 	ErrInvalidItemID   = errors.New("item id is required")
 	ErrInvalidQuantity = errors.New("quantity must be greater than zero")
+	ErrInvalidLootID   = errors.New("loot id is required")
+	ErrInvalidPlayerID = errors.New("player id is required")
 )
 
 type Service struct {
-	repository *Repository
+	repository       *Repository
+	playerRepository *player.Repository
 }
 
-func NewService(repository *Repository) *Service {
+func NewService(
+	repository *Repository,
+	playerRepository *player.Repository,
+) *Service {
 	return &Service{
-		repository: repository,
+		repository:       repository,
+		playerRepository: playerRepository,
 	}
 }
 
@@ -55,4 +63,29 @@ func (s *Service) Delete(
 	id uuid.UUID,
 ) error {
 	return s.repository.Delete(ctx, id)
+}
+
+func (s *Service) Pickup(
+	ctx context.Context,
+	userID uuid.UUID,
+	lootID uuid.UUID,
+) error {
+	if userID == uuid.Nil {
+		return ErrInvalidPlayerID
+	}
+
+	if lootID == uuid.Nil {
+		return ErrInvalidLootID
+	}
+
+	player, err := s.playerRepository.GetByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	return s.repository.PickupTx(
+		ctx,
+		player.ID,
+		lootID,
+	)
 }

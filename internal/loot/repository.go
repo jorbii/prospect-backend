@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -147,4 +148,54 @@ func (r *Repository) Delete(
 	`, id)
 
 	return err
+}
+
+func (r *Repository) PickupTx(
+	ctx context.Context,
+	playerID uuid.UUID,
+	lootID uuid.UUID,
+) error {
+
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var itemID uuid.UUID
+	var quantity int64
+
+	err = tx.QueryRow(ctx, `
+        SELECT item_id, quantity
+        FROM loot
+        WHERE id = $1
+    `, lootID).Scan(&itemID, &quantity)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+        INSERT INTO inventory_items (
+            player_id,
+            item_id,
+            quantity
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (player_id, item_id)
+        DO UPDATE SET
+            quantity = inventory_items.quantity + EXCLUDED.quantity
+    `, playerID, itemID, quantity)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+        DELETE FROM loot
+        WHERE id = $1
+    `, lootID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }

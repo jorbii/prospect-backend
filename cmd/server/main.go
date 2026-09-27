@@ -11,6 +11,7 @@ import (
 	"prospect/internal/database"
 	"prospect/internal/inventory"
 	"prospect/internal/item"
+	"prospect/internal/loadout"
 	"prospect/internal/loot"
 	"prospect/internal/player"
 	"prospect/internal/weapon"
@@ -111,8 +112,26 @@ func main() {
 	// ========================================
 
 	lootRepository := loot.NewRepository(db)
-	lootService := loot.NewService(lootRepository)
+
+	lootService := loot.NewService(
+		lootRepository,
+		playerRepository,
+	)
+
 	lootHandler := loot.NewHandler(lootService)
+
+	// ========================================
+	// loadout Module
+	// ========================================
+
+	loadoutRepository := loadout.NewRepository(db)
+
+	loadoutService := loadout.NewService(
+		loadoutRepository,
+		playerRepository,
+	)
+
+	loadoutHandler := loadout.NewHandler(loadoutService)
 
 	// ========================================
 	// Auth Routes
@@ -204,16 +223,45 @@ func main() {
 	// ========================================
 
 	http.Handle(
-		"/api/loot",
+		"/api/loot/",
 		tokenService.AuthMiddleware(
-			http.HandlerFunc(lootHandler.GetAll),
+			http.HandlerFunc(lootHandler.GetByID),
 		),
 	)
 
 	http.Handle(
-		"/api/loot/",
+		"/api/loot/pickup/",
 		tokenService.AuthMiddleware(
-			http.HandlerFunc(lootHandler.GetByID),
+			http.HandlerFunc(lootHandler.Pickup),
+		),
+	)
+
+	http.Handle(
+		"/api/loot",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(lootHandler.Create),
+		),
+	)
+
+	// ========================================
+	// loadout Route
+	// ========================================
+
+	http.Handle(
+		"/api/loadout",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					loadoutHandler.Get(w, r)
+
+				case http.MethodPost:
+					loadoutHandler.Create(w, r)
+
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}),
 		),
 	)
 
