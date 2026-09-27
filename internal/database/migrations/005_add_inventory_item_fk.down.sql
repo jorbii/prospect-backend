@@ -1,0 +1,2 @@
+ALTER TABLE inventory_items
+DROP CONSTRAINT inventory_items_item_id_fkey;
