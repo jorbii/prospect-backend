@@ -13,6 +13,7 @@ import (
 	"prospect/internal/item"
 	"prospect/internal/loadout"
 	"prospect/internal/loot"
+	"prospect/internal/match"
 	"prospect/internal/player"
 	"prospect/internal/weapon"
 )
@@ -71,6 +72,10 @@ func main() {
 		tokenService,
 		playerService,
 	)
+
+	// ========================================
+	// match Service
+	// ========================================
 
 	// ========================================
 	// Inventory Module
@@ -133,6 +138,15 @@ func main() {
 
 	loadoutHandler := loadout.NewHandler(loadoutService)
 
+	// ========================================
+	// match Module
+	// ========================================
+
+	matchRepository := match.NewRepository(db)
+
+	matchService := match.NewService(matchRepository)
+
+	matchHandler := match.NewHandler(matchService)
 	// ========================================
 	// Auth Routes
 	// ========================================
@@ -265,6 +279,16 @@ func main() {
 		),
 	)
 
+	// ========================================
+	// match Route
+	// ========================================
+
+	http.Handle(
+		"/api/matches",
+		tokenService.AuthMiddleware(
+			http.HandlerFunc(matchHandler.CreateMatch),
+		),
+	)
 	// ========================================
 	// Start Server
 	// ========================================
